@@ -40,14 +40,34 @@ def _clean_cue_line(line: str) -> str:
     return re.sub(r"\s+", " ", text.replace("\u00a0", " ")).strip()
 
 
-def _contains_word_run(haystack: str, needle: str) -> bool:
-    """True when needle's words are a contiguous run of whole words in haystack."""
-    hay = haystack.split()
-    ned = needle.split()
-    if not ned or len(ned) > len(hay):
+def _normalized_tokens(text: str) -> list[str]:
+    """Strip leading and trailing non-alphanumeric characters from each token.
+
+    Inner punctuation stays, so "don't" stays "don't". A token that is only
+    punctuation is dropped. Case is left as written.
+    """
+    tokens = []
+    for token in text.split():
+        start = 0
+        end = len(token)
+        while start < end and not token[start].isalnum():
+            start += 1
+        while end > start and not token[end - 1].isalnum():
+            end -= 1
+        if start < end:
+            tokens.append(token[start:end])
+    return tokens
+
+
+def _contains_word_run(haystack: list[str], needle: list[str]) -> bool:
+    """True when needle is a contiguous run of whole tokens in haystack.
+
+    An empty token list is never contained and contains nothing.
+    """
+    if not needle or len(needle) > len(haystack):
         return False
-    width = len(ned)
-    return any(hay[index:index + width] == ned for index in range(len(hay) - width + 1))
+    width = len(needle)
+    return any(haystack[index:index + width] == needle for index in range(len(haystack) - width + 1))
 
 
 def _decode_reference(match: re.Match) -> str:
@@ -71,11 +91,15 @@ def parse_vtt(path: Path) -> list[dict]:
     """Return [{start, end, text}], preserving each newly typed rolling line's cue times.
 
     Lines between a blank line (or the header) and the next timing are cue
-    identifiers and are not cue text. A NOTE, STYLE, or REGION block is skipped
-    through the next blank line. WEBVTT, Kind, and Language lines are skipped
-    only before the first timing. Cue settings stay on the timing line. A
-    non-rolling cue is dropped or replaces the previous cue only when its words
-    are a contiguous run of whole words in the other cue.
+    identifiers and are not cue text. Inside a cue, only an empty line ends it;
+    a whitespace-only line adds no text and does not end it. Outside a cue, and
+    inside a NOTE, STYLE, or REGION block, a whitespace-only line is blank.
+    Those blocks are skipped through the next blank line. WEBVTT, Kind, and
+    Language lines are skipped only before the first timing. Cue settings stay
+    on the timing line. A non-rolling cue is compared on tokens whose edge
+    punctuation is removed. Equal tokens keep the longer raw text, or the
+    earlier cue when the lengths match. Otherwise a cue is dropped or replaces
+    the previous cue only when its tokens are a contiguous run of whole tokens.
     """
     raw = path.read_text(encoding="utf-8", errors="replace")
     rolling = _VTT_WORD_TIME.search(raw) is not None
@@ -104,7 +128,9 @@ def parse_vtt(path: Path) -> list[dict]:
                 skipping_block = False
             continue
         if not stripped:
-            in_cue = False
+            # Inside a cue only an empty line ends it. Whitespace alone does not.
+            if not in_cue or line == "":
+                in_cue = False
             continue
         if not in_cue and _metadata_block(stripped):
             skipping_block = True
@@ -129,10 +155,16 @@ def parse_vtt(path: Path) -> list[dict]:
     collapsed: list[dict] = []
     for cue in cues:
         if collapsed:
-            last = collapsed[-1]["text"]
-            if _contains_word_run(last, cue["text"]):
+            last = collapsed[-1]
+            last_tokens = _normalized_tokens(last["text"])
+            cue_tokens = _normalized_tokens(cue["text"])
+            if cue_tokens == last_tokens:
+                if len(cue["text"]) > len(last["text"]):
+                    collapsed[-1] = cue
                 continue
-            if _contains_word_run(cue["text"], last):
+            if _contains_word_run(last_tokens, cue_tokens):
+                continue
+            if _contains_word_run(cue_tokens, last_tokens):
                 collapsed[-1] = cue
                 continue
         collapsed.append(cue)
