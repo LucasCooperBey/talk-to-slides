@@ -9,6 +9,7 @@ paths that open images, so the text helpers run without it.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 from typing import Iterable
@@ -121,7 +122,13 @@ def frames_differ(h1: int, h2: int, threshold: int = 5) -> bool:
 def chunk_ranges(total_s: float, chunk_s: float) -> list[tuple[float, float]]:
     """Split a duration into [start, end) chunks of `chunk_s`, last chunk truncated to
     `total_s`. Returns [] for a non-positive duration. Used to slice long audio into
-    pieces small enough to POST to the whisper endpoint without timing out."""
+    pieces small enough to POST to the whisper endpoint without timing out.
+
+    `chunk_s` must be a finite number above 0. Anything else raises ValueError
+    before the loop starts.
+    """
+    if not isinstance(chunk_s, (int, float)) or not math.isfinite(chunk_s) or chunk_s <= 0:
+        raise ValueError("chunk_s must be a finite number above 0")
     if total_s <= 0:
         return []
     out: list[tuple[float, float]] = []
@@ -172,13 +179,21 @@ def denoise_acceptable(fresh: dict, cached: dict, shrink: float = 0.5) -> bool:
     return True
 
 
-def ts_to_seconds(ts: str) -> int:
+def ts_to_seconds(ts: object) -> int:
     """Inverse of fmt_ts: parse 'M:SS', 'MM:SS', or 'H:MM:SS' to seconds.
 
-    Returns -1 for empty/unparseable input so callers can distinguish "no timecode"
-    from "second 0". Tolerant of stray whitespace.
+    Returns -1 for empty or unparseable input so callers can distinguish "no timecode"
+    from second 0. Tolerant of stray whitespace. A finite int or float that is not
+    negative returns int(value). A bool, a negative or non-finite number, and any
+    other non-string return -1.
     """
-    if not ts:
+    if isinstance(ts, bool):
+        return -1
+    if isinstance(ts, (int, float)):
+        if not math.isfinite(ts) or ts < 0:
+            return -1
+        return int(ts)
+    if not isinstance(ts, str) or not ts:
         return -1
     parts = ts.strip().split(":")
     try:
@@ -985,12 +1000,34 @@ def _resolve_ocr(choice: str, log) -> str:
     return backend
 
 
-def _saved_extract(out_dir: str, source) -> tuple[dict | None, dict | None]:
+_FINGERPRINT_BYTES = 1024 * 1024
+
+
+def source_fingerprint(path) -> str:
+    """Return ``<size>:<sha256>`` for a recording.
+
+    ``size`` is the file size in bytes. The digest is the hex SHA-256 of the
+    first 1 MiB, or of the whole file when it is smaller. The file is opened
+    once, in binary mode.
+    """
+    import hashlib
+    from pathlib import Path
+
+    file_path = Path(path)
+    size = file_path.stat().st_size
+    with file_path.open("rb") as handle:
+        head = handle.read(_FINGERPRINT_BYTES)
+    return f"{size}:{hashlib.sha256(head).hexdigest()}"
+
+
+def _saved_extract(out_dir: str, source, fingerprint) -> tuple[dict | None, dict | None]:
     """Return (prior_data, prior_cleanup) from OUT/data.json, or (None, None).
 
     prior_data is the saved "data" object only when it is a non-empty dict.
     prior_cleanup is meta.cleanup only when it is a dict. Both require
-    meta.source and `source` to be the same non-empty string. A missing,
+    meta.source and `source` to be the same non-empty string. When meta holds
+    a string source_fingerprint, it must equal `fingerprint` too. A folder
+    written before that field existed matches on the name alone. A missing,
     unreadable, or wrong-shaped file is not a prior. This never raises.
     """
     import json
@@ -1009,6 +1046,9 @@ def _saved_extract(out_dir: str, source) -> tuple[dict | None, dict | None]:
     saved_source = saved_meta.get("source")
     if (not isinstance(saved_source, str) or not saved_source
             or not isinstance(source, str) or not source or saved_source != source):
+        return None, None
+    saved_fingerprint = saved_meta.get("source_fingerprint")
+    if isinstance(saved_fingerprint, str) and saved_fingerprint != fingerprint:
         return None, None
     saved_data = parsed.get("data")
     prior_data = saved_data if isinstance(saved_data, dict) and saved_data else None
@@ -1047,7 +1087,13 @@ def run_extract(video: str, out_dir: str, *, chat_fps: float, share_fps: float,
     ocr_backend = _resolve_ocr(ocr, log)
     os.makedirs(out_dir, exist_ok=True)
     with folder_lock(Path(out_dir), lock_timeout):
-        prior_data, prior_cleanup = _saved_extract(out_dir, meta.get("source"))
+        # source_fingerprint opens the file. A path that is not a file yet still
+        # runs the rest of the pipeline; the probe reports a missing recording.
+        # An older cache with no source_fingerprint keeps matching by name.
+        fingerprint = source_fingerprint(video) if os.path.isfile(video) else None
+        if fingerprint is not None:
+            meta = {**meta, "source_fingerprint": fingerprint}
+        prior_data, prior_cleanup = _saved_extract(out_dir, meta.get("source"), fingerprint)
         slides_dir = os.path.join(out_dir, "slides")
         os.makedirs(slides_dir, exist_ok=True)
         work = tempfile.mkdtemp(prefix=".webextract-", dir=out_dir)
@@ -1194,6 +1240,17 @@ WHISPER_MISSING = (
 )
 
 
+def _require_chunk(value: str) -> float:
+    """argparse type: a finite number of seconds above 0."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError("chunk must be a finite number above 0") from None
+    if not math.isfinite(number) or number <= 0:
+        raise argparse.ArgumentTypeError("chunk must be a finite number above 0")
+    return number
+
+
 def transcribe_cmd(argv: list[str]) -> int:
     """`talk-to-slides transcribe AUDIO... --out DIR` -> writes transcript.json."""
     import argparse
@@ -1208,7 +1265,7 @@ def transcribe_cmd(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(prog="talk-to-slides transcribe")
     ap.add_argument("audio", nargs="+", help="audio/video file(s), in chronological order")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--chunk", type=float, default=480.0)
+    ap.add_argument("--chunk", type=_require_chunk, default=480.0)
     ap.add_argument("--whisper-url", default=None,
                     help="OpenAI-compatible /v1/audio/transcriptions endpoint (or set WHISPER_URL)")
     a = ap.parse_args(argv)
@@ -1264,7 +1321,7 @@ def _finalize_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="talk-to-slides finalize")
     ap.add_argument("--out", required=True)
     ap.add_argument("--model", default=None)
-    ap.add_argument("--llm-backend", choices=["cli", "api"], default="cli",
+    ap.add_argument("--llm-backend", default="cli",
                     help="api: metered Anthropic API (bills per token); cli: the claude CLI")
     ap.add_argument("--effort", choices=list(CLI_EFFORTS), default=None,
                     help=f"claude CLI effort for the cleanup call (default {DENOISE_CLI_EFFORT}); ignored by --llm-backend api")
@@ -1291,8 +1348,17 @@ def finalize_cmd(argv: list[str]) -> int:
     from talk_to_slides.config import DENOISE_CLI_EFFORT
     from talk_to_slides.folder_lock import folder_lock
 
-    a = _finalize_parser().parse_args(argv)
-    model = resolve_denoise_model(a.llm_backend, a.model)
+    parser = _finalize_parser()
+    a = parser.parse_args(argv)
+    # A re-render never calls the model, so a bad --llm-backend must not reject it.
+    # The model path still rejects an unknown backend before the folder lock.
+    if not a.render_only:
+        if a.llm_backend not in ("cli", "api"):
+            parser.error(
+                "argument --llm-backend: invalid choice: "
+                f"{a.llm_backend!r} (choose from 'cli', 'api')"
+            )
+        model = resolve_denoise_model(a.llm_backend, a.model)
 
     out = Path(a.out).expanduser()
     with ExitStack() as locks:

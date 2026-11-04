@@ -8,16 +8,46 @@ import os
 import re
 from pathlib import Path
 
-_VTT_TIME = re.compile(r"(\d{2}:\d{2}:\d{2}\.\d{3}) --> (\d{2}:\d{2}:\d{2}\.\d{3})")
+# Hours are two or more digits. Each side of the arrow may be HH:MM:SS.mmm or MM:SS.mmm.
+_VTT_TS = r"(?:\d{2,}:)?\d{2}:\d{2}\.\d{3}"
+_VTT_TIME = re.compile(rf"({_VTT_TS}) --> ({_VTT_TS})")
 _VTT_WORD_TIME = re.compile(r"<\d{2}:\d{2}:\d{2}\.\d{3}>")
 _TAG = re.compile(r"<[^>]+>")
-_CUE_ATTR = re.compile(r"(align|position):\S+")
 _HTML_REF = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+_METADATA_BLOCKS = ("NOTE", "STYLE", "REGION")
 
 
 def _sec(t: str) -> float:
-    h, m, s = t.split(":")
-    return int(h) * 3600 + int(m) * 60 + float(s)
+    parts = t.split(":")
+    if len(parts) == 2:
+        minutes, seconds = parts
+        return int(minutes) * 60 + float(seconds)
+    hours, minutes, seconds = parts
+    return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+
+
+def _metadata_block(line: str) -> bool:
+    """True for a NOTE, STYLE, or REGION block label, not for spoken text like NOTEbook."""
+    for name in _METADATA_BLOCKS:
+        if line == name or line.startswith(name + " ") or line.startswith(name + "\t"):
+            return True
+    return False
+
+
+def _clean_cue_line(line: str) -> str:
+    text = _TAG.sub("", line).strip()
+    text = _HTML_REF.sub(_decode_reference, text)
+    return re.sub(r"\s+", " ", text.replace("\u00a0", " ")).strip()
+
+
+def _contains_word_run(haystack: str, needle: str) -> bool:
+    """True when needle's words are a contiguous run of whole words in haystack."""
+    hay = haystack.split()
+    ned = needle.split()
+    if not ned or len(ned) > len(hay):
+        return False
+    width = len(ned)
+    return any(hay[index:index + width] == ned for index in range(len(hay) - width + 1))
 
 
 def _decode_reference(match: re.Match) -> str:
@@ -38,13 +68,23 @@ def _rolling_vtt_tail(previous: list[str], current: list[str]) -> list[str]:
 
 
 def parse_vtt(path: Path) -> list[dict]:
-    """Return [{start,end,text}], preserving each newly typed rolling line's cue times."""
+    """Return [{start, end, text}], preserving each newly typed rolling line's cue times.
+
+    Lines between a blank line (or the header) and the next timing are cue
+    identifiers and are not cue text. A NOTE, STYLE, or REGION block is skipped
+    through the next blank line. WEBVTT, Kind, and Language lines are skipped
+    only before the first timing. Cue settings stay on the timing line. A
+    non-rolling cue is dropped or replaces the previous cue only when its words
+    are a contiguous run of whole words in the other cue.
+    """
     raw = path.read_text(encoding="utf-8", errors="replace")
     rolling = _VTT_WORD_TIME.search(raw) is not None
     cues: list[dict] = []
     cur_start = cur_end = None
     cur_lines: list[str] = []
     previous_lines: list[str] = []
+    in_cue = False
+    skipping_block = False
 
     def append_cue() -> None:
         nonlocal previous_lines
@@ -58,37 +98,44 @@ def parse_vtt(path: Path) -> list[dict]:
             cues.append({"start": cur_start, "end": cur_end, "text": " ".join(lines)})
 
     for line in raw.splitlines():
-        s = line.strip()
-        if not s or s.startswith(("WEBVTT", "Kind:", "Language:")):
+        stripped = line.strip()
+        if skipping_block:
+            if not stripped:
+                skipping_block = False
             continue
-        m = _VTT_TIME.search(s)
-        if m:
+        if not stripped:
+            in_cue = False
+            continue
+        if not in_cue and _metadata_block(stripped):
+            skipping_block = True
+            continue
+        timing = _VTT_TIME.search(stripped)
+        if timing:
             append_cue()
-            cur_start = _sec(m.group(1))
-            cur_end = _sec(m.group(2))
+            cur_start = _sec(timing.group(1))
+            cur_end = _sec(timing.group(2))
             cur_lines = []
+            in_cue = True
             continue
-        if cur_start is None:
+        if not in_cue:
             continue
-        s = _CUE_ATTR.sub("", _TAG.sub("", s)).strip()
-        s = _HTML_REF.sub(_decode_reference, s)
-        s = re.sub(r"\s+", " ", s.replace("\u00a0", " ")).strip()
-        if s and (rolling or not cur_lines or s != cur_lines[-1]):
-            cur_lines.append(s)
+        text = _clean_cue_line(stripped)
+        if text and (rolling or not cur_lines or text != cur_lines[-1]):
+            cur_lines.append(text)
     append_cue()
     if rolling:
         return cues
 
     collapsed: list[dict] = []
-    for c in cues:
+    for cue in cues:
         if collapsed:
             last = collapsed[-1]["text"]
-            if c["text"] in last:
+            if _contains_word_run(last, cue["text"]):
                 continue
-            if last in c["text"]:
-                collapsed[-1] = c
+            if _contains_word_run(cue["text"], last):
+                collapsed[-1] = cue
                 continue
-        collapsed.append(c)
+        collapsed.append(cue)
     return collapsed
 
 
