@@ -50,13 +50,14 @@ class _AttemptFailed(Exception):
 
 class OcrWorker:
     def __init__(self, argv: list[str] | None = None, timeout: float | None = None, log=None,
-                 *, first_timeout: float | None = None,
+                 *, first_timeout: float | None = None, start_timeout: float | None = None,
                  reap_timeout: float = 10.0, wedged_cooldown: float = 300.0,
                  canary_path: str | None = None, canary_ttl: float = CANARY_TTL):
         self.argv = argv if argv is not None else [sys.executable, "-m", "talk_to_slides.ocr_vision"]
         self.timeout = timeout if timeout is not None else env_seconds("TALK_TO_SLIDES_OCR_TIMEOUT", "60")
         self.first_timeout = (first_timeout if first_timeout is not None
                               else env_seconds("TALK_TO_SLIDES_OCR_FIRST_TIMEOUT", "180"))
+        self.start_timeout = start_timeout
         self.reap_timeout = reap_timeout
         self.wedged_cooldown = wedged_cooldown
         self.canary_path = canary_path
@@ -160,7 +161,10 @@ class OcrWorker:
         self._served = False
         self._stdout = self._stderr = b""
         self._stderr_eof = False
-        deadline = time.monotonic() + max(self.timeout, self.first_timeout)
+        if self.start_timeout is None:
+            deadline = time.monotonic() + max(self.timeout, self.first_timeout)
+        else:
+            deadline = time.monotonic() + self.start_timeout
         try:
             self._process = subprocess.Popen(
                 self.argv,

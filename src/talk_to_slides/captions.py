@@ -97,9 +97,12 @@ def parse_vtt(path: Path) -> list[dict]:
     Those blocks are skipped through the next blank line. WEBVTT, Kind, and
     Language lines are skipped only before the first timing. Cue settings stay
     on the timing line. A non-rolling cue is compared on tokens whose edge
-    punctuation is removed. Equal tokens keep the longer raw text, or the
-    earlier cue when the lengths match. Otherwise a cue is dropped or replaces
-    the previous cue only when its tokens are a contiguous run of whole tokens.
+    punctuation is removed. An exact repeat of the previous kept cue's raw
+    text is dropped. When either cue has no normalized tokens, the new cue is
+    kept on its own: it is not equal, contained, or a replacement. Otherwise
+    equal tokens keep the longer raw text, or the earlier cue when the lengths
+    match. A cue is dropped or replaces the previous cue only when its tokens
+    are a contiguous run of whole tokens.
     """
     raw = path.read_text(encoding="utf-8", errors="replace")
     rolling = _VTT_WORD_TIME.search(raw) is not None
@@ -156,8 +159,13 @@ def parse_vtt(path: Path) -> list[dict]:
     for cue in cues:
         if collapsed:
             last = collapsed[-1]
+            if cue["text"] == last["text"]:
+                continue
             last_tokens = _normalized_tokens(last["text"])
             cue_tokens = _normalized_tokens(cue["text"])
+            if not last_tokens or not cue_tokens:
+                collapsed.append(cue)
+                continue
             if cue_tokens == last_tokens:
                 if len(cue["text"]) > len(last["text"]):
                     collapsed[-1] = cue

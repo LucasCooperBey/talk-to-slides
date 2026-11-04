@@ -19,6 +19,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 TIMEOUT = 0.3
+START_TIMEOUT = 5.0
 
 FAKE = r'''
 import json, os, signal, sys, time
@@ -93,7 +94,8 @@ def _bounded(test):
 
 
 @contextmanager
-def _fake(*, timeout=TIMEOUT, first_timeout=None, argv=None, canary_path=None):
+def _fake(*, timeout=TIMEOUT, first_timeout=None, argv=None, canary_path=None,
+          start_timeout=START_TIMEOUT):
     from talk_to_slides import ocr_vision as vision_ocr
 
     children, logs = [], []
@@ -108,6 +110,7 @@ def _fake(*, timeout=TIMEOUT, first_timeout=None, argv=None, canary_path=None):
         argv=argv if argv is not None else [sys.executable, "-c", FAKE],
         timeout=timeout, log=logs.append, canary_path=canary_path,
         first_timeout=timeout if first_timeout is None else first_timeout,
+        start_timeout=start_timeout,
     )
     try:
         with patch.object(vision_ocr.subprocess, "Popen", tracked):
@@ -209,12 +212,12 @@ def test_start_failure_and_missing_ready_fail_loudly():
     """source: 2026-10-15 Vision OCR hang in webinar-extract; startup cannot silently skip."""
     cases = [
         ("import sys; print('first', file=sys.stderr); print('import failed', file=sys.stderr); sys.exit(1)",
-         "import failed"),
-        ("import sys; sys.exit(1)", "worker exited with 1"),
-        ("import time; time.sleep(60)", f"timed out after {TIMEOUT:g}s"),
+         "import failed", START_TIMEOUT),
+        ("import sys; sys.exit(1)", "worker exited with 1", START_TIMEOUT),
+        ("import time; time.sleep(60)", f"timed out after {TIMEOUT:g}s", TIMEOUT),
     ]
-    for script, reason in cases:
-        with _fake(argv=[sys.executable, "-c", script]) as (worker, children, logs):
+    for script, reason, start_timeout in cases:
+        with _fake(argv=[sys.executable, "-c", script], start_timeout=start_timeout) as (worker, children, logs):
             _assert_error(lambda: worker.ocr("ok:hello"), f"ocr worker failed to start: {reason}")
             assert len(children) == 1 and worker.skipped == 0 and logs == []
             _assert_dead(children[0].pid)
