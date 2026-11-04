@@ -1,0 +1,26 @@
+[project]
+name = "talk-to-slides"
+version = "0.1.0"
+description = "Extract slides, on-screen text, and a short report from a talk recording."
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Lucas Cooper-Bey" }]
+requires-python = ">=3.11"
+dependencies = [
+    "pillow>=10.1",
+    "requests",
+    "ocrmac; sys_platform == 'darwin'",
+]
+
+[project.optional-dependencies]
+api = ["anthropic"]
+
+[project.scripts]
+talk-to-slides = "talk_to_slides.cli:main"
+
+[dependency-groups]
+dev = ["pytest"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

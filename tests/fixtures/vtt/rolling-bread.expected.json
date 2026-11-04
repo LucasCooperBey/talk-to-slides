@@ -1,0 +1,17 @@
+[
+  {
+    "start": 0.0,
+    "end": 1.2,
+    "text": "Mix flour"
+  },
+  {
+    "start": 1.21,
+    "end": 2.4,
+    "text": "Add water"
+  },
+  {
+    "start": 2.41,
+    "end": 3.6,
+    "text": "Knead dough"
+  }
+]

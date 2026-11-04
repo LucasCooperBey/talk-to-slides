@@ -1,0 +1,26 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      - name: Install ffmpeg and, on Linux, tesseract
+        run: |
+          if [ "$(uname)" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y ffmpeg tesseract-ocr
+          else
+            brew install ffmpeg
+          fi
+      - run: uv sync --frozen
+      - run: uv run pytest -q
