@@ -336,6 +336,16 @@ def test_render_llm_sections_appear_when_denoise_ran():
     assert "What's worth stealing" not in html
 
 
+def test_render_title_falls_back_to_the_recording_name():
+    """source: 11-03 spec review; a report with no title showed the source tool's "Webinar Extract"."""
+    html = render_html({}, [], [], [], {"source": "bread-talk.mp4"})
+    assert "<title>bread-talk</title>" in html and "<h1>bread-talk<" in html
+    assert "<title>Talk to slides</title>" in render_html({}, [], [], [], {})
+    given = render_html({}, [], [], [], {"source": "bread-talk.mp4", "title": "Proofing"})
+    assert "<title>Proofing</title>" in given
+    assert "Webinar Extract" not in html + given
+
+
 # ---- href policy for LLM-supplied links (untrusted webinar content) -------
 def test_esc_escapes_quotes_for_attributes():
     assert _esc('a"b\'c') == "a&quot;b&#39;c"

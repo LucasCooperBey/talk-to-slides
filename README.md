@@ -18,7 +18,7 @@ uv tool install git+https://github.com/LucasCooperBey/talk-to-slides
 talk-to-slides run recording.mp4 --out talk-out
 ```
 
-`run` extracts the slides, reads a `source.*.vtt` file beside the video when one is there, and writes `report.html`, `data.json`, and `slides/`. Pass `--captions notes.vtt` to name a caption file. If `--out` is omitted, the folder is `./talk-to-slides-out/<video name>`.
+`run` extracts the slides, reads a `source.*.vtt` file beside the video when one is there, and writes `report.html`, `data.json`, and `slides/`. Pass `--captions notes.vtt` to name a caption file. If `--out` is omitted, the folder is `./talk-to-slides-out/<video file name without its extension>`. `run` makes one model call, at the finalize step (see Model step); add `--no-llm` to skip it.
 
 ## Commands
 

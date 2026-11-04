@@ -784,7 +784,8 @@ def render_html(data: dict, slides: list[dict], links: list[str], chat_raw: list
     # every entry to text once here so counts, hrefs, and display all agree and a
     # non-string entry can't crash the render.
     links = _clean_links(links)
-    title = _esc(d.get("title") or meta.get("title") or "Webinar Extract")
+    recording = os.path.splitext(os.path.basename(str(meta.get("source") or "")))[0]
+    title = _esc(d.get("title") or meta.get("title") or recording or "Talk to slides")
     rows = "".join(
         f"<tr><td class=t>{_esc(m.get('t',''))}</td><td class=a>{_esc(m.get('author',''))}</td>"
         f"<td>{_esc(m.get('text',''))}</td></tr>"
