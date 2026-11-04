@@ -30,7 +30,7 @@ talk-to-slides run recording.mp4 --out talk-out
 
 `talk-to-slides finalize --out DIR` reads `data.json` and, when present, `transcript.json`, and writes the report. `--render-only` rebuilds the HTML from the saved cleanup without calling a model.
 
-`talk-to-slides run VIDEO --out DIR` runs extract without a model, then captions, then finalize, in one process.
+`talk-to-slides run VIDEO --out DIR` runs extract without a model, then captions, then finalize, in one process. `run --render-only` re-renders an existing folder from its saved cleanup without extracting again, and a busy folder exits 3.
 
 ## Model step
 

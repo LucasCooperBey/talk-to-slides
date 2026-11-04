@@ -37,18 +37,43 @@ def select_backend(choice: str) -> str:
     return "none"
 
 
-def _tesseract_lines(png_path: str) -> list[str]:
+class OcrFrameFailed(Exception):
+    """One tesseract frame failed. The file name and the reason are in the message."""
+
+
+def tesseract_frame(png_path: str) -> list[str]:
+    """Read one frame with the tesseract binary.
+
+    Raises OcrFrameFailed on a timeout, a nonzero exit, or OSError. The message
+    names the frame file and the reason. Callers that want an empty read on
+    failure use ocr_lines.
+    """
+    import os
+
     timeout = env_seconds("TALK_TO_SLIDES_OCR_TIMEOUT", "60")
-    result = subprocess.run(
-        ["tesseract", png_path, "stdout"],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    name = os.path.basename(png_path)
+    try:
+        result = subprocess.run(
+            ["tesseract", png_path, "stdout"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise OcrFrameFailed(f"{name}: timed out") from exc
+    except OSError as exc:
+        raise OcrFrameFailed(f"{name}: {exc}") from exc
     if result.returncode != 0:
-        return []
+        raise OcrFrameFailed(f"{name}: exit status {result.returncode}")
     return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def _tesseract_lines(png_path: str) -> list[str]:
+    try:
+        return tesseract_frame(png_path)
+    except OcrFrameFailed:
+        return []
 
 
 def ocr_lines(png_path: str, backend: str) -> list[str]:

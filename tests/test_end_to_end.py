@@ -3,6 +3,7 @@
 source: spec rule 9. Fails when run does not keep three distinct slides.
 """
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,10 @@ SLIDES = (
 
 def _require_ffmpeg():
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
-        pytest.skip("ffmpeg and ffprobe are required for the end-to-end recording")
+        message = "ffmpeg and ffprobe are required for the end-to-end recording"
+        if os.environ.get("CI") == "true":
+            pytest.fail(message)
+        pytest.skip(message)
 
 
 def _run(argv):

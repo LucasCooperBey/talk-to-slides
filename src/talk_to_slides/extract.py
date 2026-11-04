@@ -23,6 +23,8 @@ from talk_to_slides.llm import (
 # --------------------------------------------------------------------------------------
 
 _WS = re.compile(r"\s+")
+_SLIDE_PNG_RE = re.compile(r"^slide_\d+\.png$")
+_TESSERACT_MISSING = "tesseract not found on PATH; install it, or pass --ocr auto or --ocr none"
 
 
 def _norm(s: str) -> str:
@@ -191,6 +193,13 @@ def ts_to_seconds(ts: str) -> int:
     return total
 
 
+def _dict_entries(value) -> list[dict]:
+    """A list field that is not a list counts as empty. Entries that are not dicts are skipped."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
 def group_frames_by_slide(raw_slides: list[dict], logical_slides: list[dict]) -> list[dict]:
     """Bucket timecoded raw frames under the de-noised deck slide active at each frame's
     time, the alignment the report needs so slide TEXT lines up with the real timeline.
@@ -210,6 +219,8 @@ def group_frames_by_slide(raw_slides: list[dict], logical_slides: list[dict]) ->
     time order. If `logical_slides` is empty, returns [] (caller falls back to a flat
     per-frame render).
     """
+    logical_slides = _dict_entries(logical_slides)
+    raw_slides = _dict_entries(raw_slides)
     if not logical_slides:
         return []
 
@@ -631,13 +642,14 @@ def _gallery(frames: list[dict]) -> str:
     the group (active one highlighted) and clicking a thumb promotes it to the main
     photo. Clicking the main photo opens the shared lightbox (script at end of report).
     """
+    frames = _dict_entries(frames)
     if not frames:
         return ""
     f0 = frames[0]
-    main_src = _frame_full(f0) or f0.get("thumb", "")
+    main_src = _esc(_frame_full(f0) or f0.get("thumb") or "")
     thumbs = "".join(
-        f'<img class="gthumb{" on" if i == 0 else ""}" src="{fr.get("thumb") or _frame_full(fr)}"'
-        f' data-full="{_frame_full(fr)}" data-t="{_esc(fr.get("t", ""))}" loading="lazy" alt="frame {i + 1}">'
+        f'<img class="gthumb{" on" if i == 0 else ""}" src="{_esc(fr.get("thumb") or _frame_full(fr) or "")}"'
+        f' data-full="{_esc(_frame_full(fr))}" data-t="{_esc(fr.get("t", ""))}" loading="lazy" alt="frame {i + 1}">'
         for i, fr in enumerate(frames)
     )
     multi = len(frames) > 1
@@ -647,7 +659,7 @@ def _gallery(frames: list[dict]) -> str:
     strip = f'<div class="gstrip">{thumbs}</div>' if multi else ""
     return (
         f'<div class="gmainwrap">'
-        f'<img class="gmain" src="{main_src}" data-fb="{f0.get("thumb", "")}"'
+        f'<img class="gmain" src="{main_src}" data-fb="{_esc(f0.get("thumb") or "")}"'
         f' data-t="{_esc(f0.get("t", ""))}" loading="lazy" decoding="async" alt="slide capture">'
         f'{nav}{count}<span class="gtime">{_esc(f0.get("t", ""))}</span>'
         f'</div>{strip}'
@@ -782,18 +794,21 @@ def render_html(data: dict, slides: list[dict], links: list[str], chat_raw: list
     d = data or {}
     # links may come straight from the LLM (finalize adopts data2["links"]): normalize
     # every entry to text once here so counts, hrefs, and display all agree and a
-    # non-string entry can't crash the render.
+    # non-string entry can't crash the render. A non-list counts as no links.
+    if not isinstance(links, list):
+        links = []
     links = _clean_links(links)
     recording = os.path.splitext(os.path.basename(str(meta.get("source") or "")))[0]
     title = _esc(d.get("title") or meta.get("title") or recording or "Talk to slides")
+    chat = _dict_entries(d.get("chat"))
     rows = "".join(
         f"<tr><td class=t>{_esc(m.get('t',''))}</td><td class=a>{_esc(m.get('author',''))}</td>"
         f"<td>{_esc(m.get('text',''))}</td></tr>"
-        for m in d.get("chat", [])
+        for m in chat
     )
     moments = "".join(
         f"<tr><td class=t>{_esc(k.get('t',''))}</td><td>{_esc(k.get('note',''))}</td></tr>"
-        for k in d.get("key_moments", [])
+        for k in _dict_entries(d.get("key_moments"))
     )
     transcript_html = ""
     if transcript:
@@ -805,7 +820,10 @@ def render_html(data: dict, slides: list[dict], links: list[str], chat_raw: list
             f"<h2>Full transcript ({fmt_ts(transcript[-1]['end']) if transcript else '0:00'})</h2>"
             f"<div class=tx>{paras}</div>"
         )
-    takeaways = "".join(f"<li>{_esc(x)}</li>" for x in d.get("takeaways", []))
+    takeaway_items = d.get("takeaways") if isinstance(d.get("takeaways"), list) else []
+    takeaways = "".join(
+        f"<li>{_esc(x if isinstance(x, str) else str(x))}</li>" for x in takeaway_items
+    )
     link_items = "".join(
         (f'<li><a href="{_esc(href)}">{_esc(u)}</a></li>' if (href := _safe_href(u))
          else f"<li>{_esc(u)}</li>")
@@ -815,7 +833,11 @@ def render_html(data: dict, slides: list[dict], links: list[str], chat_raw: list
     # bucketed under the deck slide that was on screen at that frame's timecode. This
     # replaces a broken n==n join that assumed one logical slide per raw frame (it isn't)
     # and left every frame past the last logical index text-less.
-    logical = d.get("slides", [])
+    if not isinstance(slides, list):
+        slides = []
+    else:
+        slides = [frame for frame in slides if isinstance(frame, dict)]
+    logical = _dict_entries(d.get("slides"))
     groups = group_frames_by_slide(slides, logical)
     slide_html = ""
     if groups:
@@ -828,8 +850,9 @@ def render_html(data: dict, slides: list[dict], links: list[str], chat_raw: list
             # On-screen window = the real captured-frame span (falls back to the deck
             # slide's own timecode when, unusually, no frame bucketed here).
             if frames:
-                tlabel = (f"{_esc(frames[0]['t'])}-{_esc(frames[-1]['t'])}"
-                          if len(frames) > 1 else _esc(frames[0]['t']))
+                first_t = _esc(frames[0].get("t", ""))
+                last_t = _esc(frames[-1].get("t", ""))
+                tlabel = f"{first_t}-{last_t}" if len(frames) > 1 else first_t
             else:
                 tlabel = _esc(sl.get("t", ""))
             # LLM interpretation of a novel/substantive slide; "" (or whitespace) for
@@ -851,12 +874,12 @@ def render_html(data: dict, slides: list[dict], links: list[str], chat_raw: list
             gal = _gallery([s]) if (s.get("thumb") or s.get("png")) else ""
             slide_html += (
                 f"<div class=slide><div class=viz>{gal}</div>"
-                f"<div class=cap><b>Slide {s['n']}</b> · {_esc(s['t'])}<ul>{raw_lines}</ul></div></div>"
+                f"<div class=cap><b>Slide {s['n']}</b> · {_esc(s.get('t', ''))}<ul>{raw_lines}</ul></div></div>"
             )
     parts = ", ".join(_esc(p) for p in d.get("participants", meta.get("participants", [])))
     # Sections render only when they have content, a --no-chat talk must not show a
     # dead "(0 lines)" dropdown that opens into nothing, or an empty chat/links table.
-    chat_html = (f"<h2>Chat log ({len(d.get('chat', []))} messages)</h2><table>{rows}</table>"
+    chat_html = (f"<h2>Chat log ({len(chat)} messages)</h2><table>{rows}</table>"
                  if rows else "")
     raw_block = _esc("\n".join(chat_raw))
     raw_details = (f"<details><summary>Raw scroll-stitched chat OCR ({len(chat_raw)} lines)"
@@ -919,7 +942,7 @@ details{{margin-top:24px}}pre{{white-space:pre-wrap;font-size:12px;color:#555;ba
 {takeaways_html}
 {('<h2>Key moments (spoken)</h2><table>' + moments + '</table>') if moments else ''}
 {links_html}
-<h2>Slides &amp; shared screen ({(str(len(d.get('slides', []))) + ' deck slides · ') if d.get('slides') else ''}{len(slides)} captured frames)</h2>{slide_html or '<p><i>none</i></p>'}
+<h2>Slides &amp; shared screen ({(str(len(logical)) + ' deck slides · ') if logical else ''}{len(slides)} captured frames)</h2>{slide_html or '<p><i>none</i></p>'}
 {chat_html}
 {transcript_html}
 {raw_details}
@@ -935,155 +958,230 @@ details{{margin-top:24px}}pre{{white-space:pre-wrap;font-size:12px;color:#555;ba
 
 
 def _read_ocr(path: str, backend: str) -> list[str]:
-    """Read one frame. vision goes through ocr_lines so tests can patch that function."""
+    """Read one frame. vision goes through ocr_lines so tests can patch that function.
+
+    tesseract goes through tesseract_frame, which raises OcrFrameFailed. run_extract
+    counts those and keeps going. ocr_lines still returns [] on the same failures.
+    """
     if backend == "none":
         return []
     if backend == "tesseract":
-        from talk_to_slides.ocr import ocr_lines as dispatch
+        from talk_to_slides.ocr import tesseract_frame
 
-        return dispatch(path, "tesseract")
+        return tesseract_frame(path)
     return ocr_lines(path)
 
 
 def _resolve_ocr(choice: str, log) -> str:
+    import shutil
+
     from talk_to_slides.ocr import OCR_NONE_WARNING, select_backend
 
+    if choice == "tesseract" and shutil.which("tesseract") is None:
+        raise ValueError(_TESSERACT_MISSING)
     backend = select_backend(choice)
     if choice == "auto" and backend == "none":
         log(OCR_NONE_WARNING)
     return backend
 
 
+def _saved_extract(out_dir: str, source) -> tuple[dict | None, dict | None]:
+    """Return (prior_data, prior_cleanup) from OUT/data.json, or (None, None).
+
+    prior_data is the saved "data" object only when it is a non-empty dict.
+    prior_cleanup is meta.cleanup only when it is a dict. Both require
+    meta.source and `source` to be the same non-empty string. A missing,
+    unreadable, or wrong-shaped file is not a prior. This never raises.
+    """
+    import json
+
+    path = os.path.join(out_dir, "data.json")
+    try:
+        with open(path) as handle:
+            parsed = json.loads(handle.read())
+    except Exception:  # noqa: BLE001 - a bad cache must not abort the extract
+        return None, None
+    if not isinstance(parsed, dict):
+        return None, None
+    saved_meta = parsed.get("meta")
+    if not isinstance(saved_meta, dict):
+        return None, None
+    saved_source = saved_meta.get("source")
+    if (not isinstance(saved_source, str) or not saved_source
+            or not isinstance(source, str) or not source or saved_source != source):
+        return None, None
+    saved_data = parsed.get("data")
+    prior_data = saved_data if isinstance(saved_data, dict) and saved_data else None
+    cleanup = saved_meta.get("cleanup")
+    prior_cleanup = cleanup if isinstance(cleanup, dict) else None
+    return prior_data, prior_cleanup
+
+
+def _remove_old_slide_pngs(slides_dir: str) -> None:
+    """Delete prior slide_NN.png captures and leave every other file in the folder."""
+    for name in os.listdir(slides_dir):
+        if _SLIDE_PNG_RE.fullmatch(name):
+            os.remove(os.path.join(slides_dir, name))
+
+
 def run_extract(video: str, out_dir: str, *, chat_fps: float, share_fps: float,
                 chat_crop: str, share_crop: str, use_llm: bool, model: str,
                 meta: dict, no_chat: bool = False, backend: str = "cli",
-                effort: str | None = None, ocr: str = "vision", log=print) -> dict:
+                effort: str | None = None, ocr: str = "vision",
+                lock_timeout: float = 600.0, log=print) -> dict:
     """Full pipeline. Writes report.html / data.json / chat_raw.txt / slides/ into out_dir.
 
     ocr defaults to vision so direct callers keep the bounded Vision worker. The CLI
-    passes auto, tesseract, vision, or none.
+    passes auto, tesseract, vision, or none. lock_timeout is how long to wait for
+    the folder lock. A timeout raises TimeoutError.
     """
     import json
-    import os
     import shutil
     import tempfile
+    from pathlib import Path
 
+    from talk_to_slides.folder_lock import folder_lock
+    from talk_to_slides.ocr import OcrFrameFailed
+
+    # Refuse a missing tesseract before creating the folder or probing the video.
+    ocr_backend = _resolve_ocr(ocr, log)
     os.makedirs(out_dir, exist_ok=True)
-    slides_dir = os.path.join(out_dir, "slides")
-    os.makedirs(slides_dir, exist_ok=True)
-    work = tempfile.mkdtemp(prefix=".webextract-", dir=out_dir)
+    with folder_lock(Path(out_dir), lock_timeout):
+        prior_data, prior_cleanup = _saved_extract(out_dir, meta.get("source"))
+        slides_dir = os.path.join(out_dir, "slides")
+        os.makedirs(slides_dir, exist_ok=True)
+        work = tempfile.mkdtemp(prefix=".webextract-", dir=out_dir)
+        tesseract_skipped = 0
 
-    try:
-        w, h, dur = _probe_dims(video)
-        meta = {**meta, "width": w, "height": h, "duration_s": round(dur, 1)}
-        log(f"  {w}x{h}  {dur/60:.1f} min")
-
-        ocr_backend = _resolve_ocr(ocr, log)
-        meta["ocr"] = ocr_backend
-        if ocr_backend == "vision":
-            from talk_to_slides.ocr_vision import _get_default_worker
-
-            ocr_worker = _get_default_worker()
-            skipped_before = ocr_worker.skipped
-            verified_before = ocr_worker.verified_empty
-        else:
-            ocr_worker = None
-            skipped_before = 0
-            verified_before = 0
-
-        # --- chat panel: dense sample, dedup, filter, OCR, scroll-stitch ---
-        chat_stream: list[str] = []
-        if no_chat:
-            log("  chat pass skipped (--no-chat: full-screen / no chat panel)")
-        else:
-            log("  extracting chat-panel frames…")
-            chat_frames, _ = _extract_crop_frames(video, work, chat_fps, chat_crop, "chat")
-            chat_kept = dedup_changed(chat_frames, threshold=3)
-            log(f"  chat frames: {len(chat_frames)} -> {len(chat_kept)} changed")
-            chat_used = 0
-            for p in chat_kept:
-                lines = _read_ocr(p, ocr_backend)
-                if not looks_like_chat(lines):
-                    continue
-                chat_used += 1
-                chat_stream = stitch_scroll(chat_stream, lines)
-            log(f"  chat OCR'd {chat_used} valid frames -> {len(chat_stream)} stitched lines")
-
-        # --- shared screen: sample, dedup visually, OCR, dedup by text, keep as slides ---
-        log("  extracting shared-screen frames…")
-        share_frames, ffmpeg_rc = _extract_crop_frames(video, work, share_fps, share_crop, "share")
-        meta.update(ffmpeg_rc=ffmpeg_rc, share_sampled=len(share_frames), share_fps=share_fps)
-        share_kept = dedup_changed(share_frames, threshold=5)
-        share_ocr = [_read_ocr(p, ocr_backend) for p in share_kept]
-        if ocr_worker is not None:
-            meta["ocr_skipped"] = ocr_worker.skipped - skipped_before
-            # Verified empties can include chat frames because both passes call ocr_lines.
-            meta["ocr_empty"] = ocr_worker.verified_empty - verified_before
-        else:
-            meta["ocr_skipped"] = 0
-            meta["ocr_empty"] = 0
-        meta["ocr_frames"] = len(share_kept)
-        if meta["ocr_skipped"]:
-            log(f"  ocr skipped {meta['ocr_skipped']} frames")
-        # Empty text would make dedup_changed_texts collapse every frame into none.
-        if ocr_backend == "none":
-            slide_idx = list(range(len(share_kept)))
-        else:
-            slide_idx = dedup_changed_texts(share_ocr, threshold=0.6)
-        log(f"  share frames: {len(share_frames)} -> {len(share_kept)} visual -> {len(slide_idx)} slides")
-        slides: list[dict] = []
-        for n, i in enumerate(slide_idx, 1):
-            src = share_kept[i]
-            name = f"slide_{n:02d}.png"
-            dst = os.path.join(slides_dir, name)
-            shutil.copyfile(src, dst)
-            # frame index within the share stream -> approx timestamp
-            t_s = (share_frames.index(src)) / share_fps
-            slides.append({
-                "n": n,
-                "t": f"{int(t_s//60):02d}:{int(t_s%60):02d}",
-                "lines": share_ocr[i],
-                "png": f"slides/{name}",
-                "thumb": _b64_thumb(src),
-            })
-
-        # --- links across everything ---
-        joined = "\n".join(chat_stream) + "\n" + "\n".join(
-            ln for s in slides for ln in s["lines"]
-        )
-        links = extract_urls(joined)
-        log(f"  links: {len(links)}")
-
-        # --- LLM de-noise into structured deliverable ---
-        data: dict = {}
-        if use_llm:
-            log(f"  de-noising with {model} via {backend}…")
+        def read_frame(path: str) -> list[str]:
+            nonlocal tesseract_skipped
             try:
-                data = denoise_llm(chat_stream, slides, "\n".join(links), meta, model,
-                                   backend=backend, effort=effort, log=log)
-                links = _clean_links(data.get("links")) or links
-                log(f"  LLM: {len(data.get('chat', []))} chat msgs, {len(data.get('slides', []))} slides")
-            except ClaudeCliNotFound:
-                log(CLI_MISSING_LINE)
-            except Exception as e:  # noqa: BLE001
-                log(f"  LLM step failed ({type(e).__name__}: {e}); emitting raw artifacts only")
+                return _read_ocr(path, ocr_backend)
+            except OcrFrameFailed:
+                tesseract_skipped += 1
+                return []
 
-        # --- write artifacts ---
-        with open(os.path.join(out_dir, "data.json"), "w") as f:
-            json.dump({"meta": meta, "data": data, "links": links,
-                       "slides": [{k: v for k, v in s.items() if k != "thumb"} for s in slides],
-                       "chat_raw": chat_stream}, f, indent=2)
-        html = render_html(data, slides, links, chat_stream, meta)
-        html_path = os.path.join(out_dir, "report.html")
-        with open(html_path, "w") as f:
-            f.write(html)
-        with open(os.path.join(out_dir, "chat_raw.txt"), "w") as f:
-            f.write("\n".join(chat_stream))
-        log(f"  wrote {html_path}")
-        return {"html": html_path, "slides": len(slides), "chat_lines": len(chat_stream),
-                "chat_msgs": len(data.get("chat", [])), "links": len(links)}
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
+        try:
+            w, h, dur = _probe_dims(video)
+            meta = {**meta, "width": w, "height": h, "duration_s": round(dur, 1)}
+            log(f"  {w}x{h}  {dur/60:.1f} min")
+
+            meta["ocr"] = ocr_backend
+            if ocr_backend == "vision":
+                from talk_to_slides.ocr_vision import _get_default_worker
+
+                ocr_worker = _get_default_worker()
+                skipped_before = ocr_worker.skipped
+                verified_before = ocr_worker.verified_empty
+            else:
+                ocr_worker = None
+                skipped_before = 0
+                verified_before = 0
+
+            # --- chat panel: dense sample, dedup, filter, OCR, scroll-stitch ---
+            chat_stream: list[str] = []
+            if no_chat:
+                log("  chat pass skipped (--no-chat: full-screen / no chat panel)")
+            else:
+                log("  extracting chat-panel frames…")
+                chat_frames, _ = _extract_crop_frames(video, work, chat_fps, chat_crop, "chat")
+                chat_kept = dedup_changed(chat_frames, threshold=3)
+                log(f"  chat frames: {len(chat_frames)} -> {len(chat_kept)} changed")
+                chat_used = 0
+                for p in chat_kept:
+                    lines = read_frame(p)
+                    if not looks_like_chat(lines):
+                        continue
+                    chat_used += 1
+                    chat_stream = stitch_scroll(chat_stream, lines)
+                log(f"  chat OCR'd {chat_used} valid frames -> {len(chat_stream)} stitched lines")
+
+            # --- shared screen: sample, dedup visually, OCR, dedup by text, keep as slides ---
+            log("  extracting shared-screen frames…")
+            share_frames, ffmpeg_rc = _extract_crop_frames(video, work, share_fps, share_crop, "share")
+            meta.update(ffmpeg_rc=ffmpeg_rc, share_sampled=len(share_frames), share_fps=share_fps)
+            share_kept = dedup_changed(share_frames, threshold=5)
+            share_ocr = [read_frame(p) for p in share_kept]
+            if ocr_worker is not None:
+                meta["ocr_skipped"] = ocr_worker.skipped - skipped_before
+                # Verified empties can include chat frames because both passes call ocr_lines.
+                meta["ocr_empty"] = ocr_worker.verified_empty - verified_before
+            elif ocr_backend == "tesseract":
+                meta["ocr_skipped"] = tesseract_skipped
+                meta["ocr_empty"] = 0
+            else:
+                meta["ocr_skipped"] = 0
+                meta["ocr_empty"] = 0
+            meta["ocr_frames"] = len(share_kept)
+            if meta["ocr_skipped"]:
+                log(f"  ocr skipped {meta['ocr_skipped']} frames")
+            # Empty text would make dedup_changed_texts collapse every frame into none.
+            if ocr_backend == "none":
+                slide_idx = list(range(len(share_kept)))
+            else:
+                slide_idx = dedup_changed_texts(share_ocr, threshold=0.6)
+            log(f"  share frames: {len(share_frames)} -> {len(share_kept)} visual -> {len(slide_idx)} slides")
+            _remove_old_slide_pngs(slides_dir)
+            slides: list[dict] = []
+            for n, i in enumerate(slide_idx, 1):
+                src = share_kept[i]
+                name = f"slide_{n:02d}.png"
+                dst = os.path.join(slides_dir, name)
+                shutil.copyfile(src, dst)
+                # frame index within the share stream -> approx timestamp
+                t_s = (share_frames.index(src)) / share_fps
+                slides.append({
+                    "n": n,
+                    "t": f"{int(t_s//60):02d}:{int(t_s%60):02d}",
+                    "lines": share_ocr[i],
+                    "png": f"slides/{name}",
+                    "thumb": _b64_thumb(src),
+                })
+
+            # --- links across everything ---
+            joined = "\n".join(chat_stream) + "\n" + "\n".join(
+                ln for s in slides for ln in s["lines"]
+            )
+            links = extract_urls(joined)
+            log(f"  links: {len(links)}")
+
+            # --- LLM de-noise into structured deliverable ---
+            data: dict = {}
+            if use_llm:
+                log(f"  de-noising with {model} via {backend}…")
+                try:
+                    data = denoise_llm(chat_stream, slides, "\n".join(links), meta, model,
+                                       backend=backend, effort=effort, log=log)
+                    links = _clean_links(data.get("links")) or links
+                    log(f"  LLM: {len(data.get('chat', []))} chat msgs, {len(data.get('slides', []))} slides")
+                except ClaudeCliNotFound:
+                    log(CLI_MISSING_LINE)
+                except Exception as e:  # noqa: BLE001
+                    log(f"  LLM step failed ({type(e).__name__}: {e}); emitting raw artifacts only")
+                if prior_data is not None and not denoise_acceptable(data, prior_data):
+                    data = prior_data
+                    log("  LLM reply incomplete vs cache - keeping cached de-noise")
+            else:
+                data = prior_data if prior_data is not None else {}
+            if data is prior_data and prior_cleanup is not None:
+                meta["cleanup"] = prior_cleanup
+
+            # --- write artifacts ---
+            with open(os.path.join(out_dir, "data.json"), "w") as f:
+                json.dump({"meta": meta, "data": data, "links": links,
+                           "slides": [{k: v for k, v in s.items() if k != "thumb"} for s in slides],
+                           "chat_raw": chat_stream}, f, indent=2)
+            html = render_html(data, slides, links, chat_stream, meta)
+            html_path = os.path.join(out_dir, "report.html")
+            with open(html_path, "w") as f:
+                f.write(html)
+            with open(os.path.join(out_dir, "chat_raw.txt"), "w") as f:
+                f.write("\n".join(chat_stream))
+            log(f"  wrote {html_path}")
+            return {"html": html_path, "slides": len(slides), "chat_lines": len(chat_stream),
+                    "chat_msgs": len(data.get("chat", [])), "links": len(links)}
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
 
 
 # Crop expressions for a side-chat layout. The default layout is the whole frame.
@@ -1298,6 +1396,8 @@ def _extract_parser() -> argparse.ArgumentParser:
     ap.add_argument("--title", default="")
     ap.add_argument("--presenter", default="")
     ap.add_argument("--date", default="")
+    ap.add_argument("--lock-timeout", type=float, default=600,
+                    help="seconds to wait for the extract folder lock (default 600)")
     return ap
 
 
@@ -1305,8 +1405,6 @@ def _run_parser() -> argparse.ArgumentParser:
     ap = _extract_parser()
     ap.prog = "talk-to-slides run"
     ap.add_argument("--captions", default=None, help="WebVTT file. If omitted, a source.*.vtt beside the video is used.")
-    ap.add_argument("--lock-timeout", type=float, default=600,
-                    help="seconds to wait for the extract folder lock (default 600)")
     ap.add_argument("--render-only", action="store_true",
                     help="re-render report.html from the cached de-noise in data.json (no LLM pass)")
     return ap
@@ -1373,47 +1471,7 @@ def attach_captions(video: str, out, captions_file: str | None) -> int:
     return 0
 
 
-def extract_cmd(argv: list[str]) -> int:
-    from pathlib import Path
-
-    args = _extract_parser().parse_args(argv)
-    model = resolve_denoise_model(args.llm_backend, args.model)
-    vid = str(Path(args.video).expanduser())
-    out = _output_dir(vid, args.out)
-    no_chat, chat_crop, share_crop = resolve_layout(args)
-    print(f"talk-to-slides -> {out}", flush=True)
-    res = run_extract(
-        vid, out,
-        chat_fps=args.chat_fps, share_fps=args.share_fps,
-        chat_crop=chat_crop, share_crop=share_crop,
-        use_llm=not args.no_llm, model=model, backend=args.llm_backend, effort=args.effort,
-        no_chat=no_chat, ocr=args.ocr,
-        meta=_recording_meta(vid, args),
-    )
-    print(f"DONE: {res}")
-    return 0
-
-
-def run_cmd(argv: list[str]) -> int:
-    """Extract with no model, attach captions, then finalize. All in this process."""
-    from pathlib import Path
-
-    args = _run_parser().parse_args(argv)
-    vid = str(Path(args.video).expanduser())
-    out = _output_dir(vid, args.out)
-    no_chat, chat_crop, share_crop = resolve_layout(args)
-    print(f"talk-to-slides -> {out}", flush=True)
-    run_extract(
-        vid, out,
-        chat_fps=args.chat_fps, share_fps=args.share_fps,
-        chat_crop=chat_crop, share_crop=share_crop,
-        use_llm=False, model="", backend=args.llm_backend, effort=args.effort,
-        no_chat=no_chat, ocr=args.ocr,
-        meta=_recording_meta(vid, args),
-    )
-    status = attach_captions(vid, out, args.captions)
-    if status:
-        return status
+def _finalize_argv_from_run(args, out: str) -> list[str]:
     fin = ["--out", out, "--llm-backend", args.llm_backend,
            "--lock-timeout", str(args.lock_timeout)]
     if args.model:
@@ -1426,7 +1484,90 @@ def run_cmd(argv: list[str]) -> int:
             fin += [f"--{name}", value]
     if args.no_llm or args.render_only:
         fin.append("--render-only")
-    return finalize_cmd(fin)
+    return fin
+
+
+def _extract_command_error(exc: Exception, out: str) -> int | None:
+    """Map a busy folder to exit 3 and a missing tesseract to exit 2."""
+    import sys
+
+    if isinstance(exc, TimeoutError):
+        print(f"EXTRACT BUSY: {out}", file=sys.stderr)
+        return 3
+    if isinstance(exc, ValueError) and str(exc) == _TESSERACT_MISSING:
+        print(str(exc), file=sys.stderr)
+        return 2
+    return None
+
+
+def extract_cmd(argv: list[str]) -> int:
+    from pathlib import Path
+
+    args = _extract_parser().parse_args(argv)
+    model = resolve_denoise_model(args.llm_backend, args.model)
+    vid = str(Path(args.video).expanduser())
+    out = _output_dir(vid, args.out)
+    no_chat, chat_crop, share_crop = resolve_layout(args)
+    print(f"talk-to-slides -> {out}", flush=True)
+    try:
+        res = run_extract(
+            vid, out,
+            chat_fps=args.chat_fps, share_fps=args.share_fps,
+            chat_crop=chat_crop, share_crop=share_crop,
+            use_llm=not args.no_llm, model=model, backend=args.llm_backend, effort=args.effort,
+            no_chat=no_chat, ocr=args.ocr, lock_timeout=args.lock_timeout,
+            meta=_recording_meta(vid, args),
+        )
+    except (TimeoutError, ValueError) as exc:
+        code = _extract_command_error(exc, out)
+        if code is None:
+            raise
+        return code
+    print(f"DONE: {res}")
+    return 0
+
+
+def run_cmd(argv: list[str]) -> int:
+    """Extract with no model, attach captions, then finalize. All in this process."""
+    import sys
+    from pathlib import Path
+
+    args = _run_parser().parse_args(argv)
+    vid = str(Path(args.video).expanduser())
+    out = _output_dir(vid, args.out)
+    print(f"talk-to-slides -> {out}", flush=True)
+    if args.render_only:
+        if not (Path(out) / "data.json").is_file():
+            print(
+                f"run --render-only: no data.json in {out} to re-render; "
+                "run without --render-only first",
+                file=sys.stderr,
+            )
+            return 2
+        return finalize_cmd(_finalize_argv_from_run(args, out))
+    # A bad model setting fails before the long extract. --no-llm and
+    # --render-only do not call a model, so they skip this check.
+    if not args.no_llm:
+        resolve_denoise_model(args.llm_backend, args.model)
+    no_chat, chat_crop, share_crop = resolve_layout(args)
+    try:
+        run_extract(
+            vid, out,
+            chat_fps=args.chat_fps, share_fps=args.share_fps,
+            chat_crop=chat_crop, share_crop=share_crop,
+            use_llm=False, model="", backend=args.llm_backend, effort=args.effort,
+            no_chat=no_chat, ocr=args.ocr, lock_timeout=args.lock_timeout,
+            meta=_recording_meta(vid, args),
+        )
+    except (TimeoutError, ValueError) as exc:
+        code = _extract_command_error(exc, out)
+        if code is None:
+            raise
+        return code
+    status = attach_captions(vid, out, args.captions)
+    if status:
+        return status
+    return finalize_cmd(_finalize_argv_from_run(args, out))
 
 
 def main() -> int:
